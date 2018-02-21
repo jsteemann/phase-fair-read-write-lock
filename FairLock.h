@@ -31,10 +31,11 @@ class FairLock {
   /// @brief an object that can be notified and that is linked with
   /// its followers in a singly linked list
   struct Notifiable {
-    Notifiable() : next(nullptr) {}
+    Notifiable(std::condition_variable* cond) 
+      : cond(cond), next(nullptr) {}
 
-    /// @brief condition variable, used to notifiy the object
-    std::condition_variable cond;
+    /// @brief condition variable, used to notify the object
+    std::condition_variable* cond;
     
     /// @brief next following object in singly linked list
     Notifiable* next;
@@ -52,13 +53,25 @@ class FairLock {
     
     /// @brief wake up the queue head if the queue is non-empty
     /// returns true if the queue head was woken up, false otherwise
-    bool notify() {
+    bool notifyOne() {
       if (empty()) {
         // queue is empty, nothing to do
         return false;
       }
       // wake up queue head
-      _start->cond.notify_one();
+      _start->cond->notify_one();
+      return true;
+    }
+    
+    /// @brief wake up all waiters in the queue head if the queue is non-empty
+    /// returns true if at least one waiter was woken up, false otherwise
+    bool notifyAll() {
+      if (empty()) {
+        // queue is empty, nothing to do
+        return false;
+      }
+      // wake up queue head
+      _start->cond->notify_all();
       return true;
     }
   
@@ -144,10 +157,12 @@ class FairLock {
      
       // put a Notifiable object into the write queue, that can be woken up whenever
       // it is its turn 
-      Notifiable notifiable;
+      // each writer gets its own condition variable
+      std::condition_variable cond;
+      Notifiable notifiable(&cond);
       _writeQueue.add(&notifiable);
 
-      bool expired = !notifiable.cond.wait_until(guard, deadline, [&]() -> bool { 
+      bool expired = !cond.wait_until(guard, deadline, [&]() -> bool { 
         return _whoEntered == 0 && (_readQueue.empty() || _nextPreferredPhase == Phase::WRITE); 
       });
      
@@ -178,10 +193,12 @@ class FairLock {
       
       // put a Notifiable object into the write queue, that can be woken up whenever
       // it is its turn 
-      Notifiable notifiable;
+      // each writer gets its own condition variable
+      std::condition_variable cond;
+      Notifiable notifiable(&cond);
       _writeQueue.add(&notifiable);
 
-      notifiable.cond.wait(guard, [&]() -> bool { 
+      cond.wait(guard, [&]() -> bool { 
         return _whoEntered == 0 && (_readQueue.empty() || _nextPreferredPhase == Phase::WRITE); 
       });
 
@@ -205,12 +222,12 @@ class FairLock {
 
     // wake up potential other waiters
     if (_nextPreferredPhase == Phase::READ) {
-      if (!_readQueue.notify()) {
-        _writeQueue.notify();
+      if (!_readQueue.notifyAll()) {
+        _writeQueue.notifyOne();
       }
     } else if (_nextPreferredPhase == Phase::WRITE) {
-      if (!_writeQueue.notify()) {
-        _readQueue.notify();
+      if (!_writeQueue.notifyOne()) {
+        _readQueue.notifyAll();
       }
     }
   }
@@ -228,10 +245,11 @@ class FairLock {
       
       // put a Notifiable object into the write queue, that can be woken up whenever
       // it is its turn 
-      Notifiable notifiable;
+      // all readers share the same condition variable
+      Notifiable notifiable(&_readCondition);
       _readQueue.add(&notifiable);
       
-      bool expired = !notifiable.cond.wait_until(guard, deadline, [&]() -> bool { 
+      bool expired = !_readCondition.wait_until(guard, deadline, [&]() -> bool { 
         return _whoEntered >= 0 && (_writeQueue.empty() || _nextPreferredPhase == Phase::READ); 
       });
       
@@ -262,10 +280,11 @@ class FairLock {
 
       // put a Notifiable object into the write queue, that can be woken up whenever
       // it is its turn 
-      Notifiable notifiable;
+      // all readers share the same condition variable
+      Notifiable notifiable(&_readCondition);
       _readQueue.add(&notifiable);
 
-      notifiable.cond.wait(guard, [&]() -> bool { 
+      _readCondition.wait(guard, [&]() -> bool { 
         return _whoEntered >= 0 && (_writeQueue.empty() || _nextPreferredPhase == Phase::READ); 
       });
 
@@ -290,12 +309,12 @@ class FairLock {
     
     // wake up potential other waiters
     if (_nextPreferredPhase == Phase::READ) {
-      if (!_readQueue.notify()) {
-        _writeQueue.notify();
+      if (!_readQueue.notifyAll()) {
+        _writeQueue.notifyOne();
       }
     } else if (_nextPreferredPhase == Phase::WRITE) {
-      if (!_writeQueue.notify()) {
-        _readQueue.notify();
+      if (!_writeQueue.notifyOne()) {
+        _readQueue.notifyAll();
       }
     }
   }
@@ -309,6 +328,9 @@ class FairLock {
   
   /// @brief currently queued read operations that will be notified eventually
   Queue _readQueue;
+    
+  /// @brief condition variable, used to notify all readers
+  std::condition_variable _readCondition;
   
   // @brief who is currently holding the lock:
   //    -1 = a writer got the lock, 

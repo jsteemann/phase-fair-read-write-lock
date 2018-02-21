@@ -40,48 +40,6 @@ class FairLock {
     Notifiable* next;
   };
 
-  /// @brief a simple freelist for reusing heap-allocated Notifiable objects 
-  class Freelist {
-   public:
-    /// @brief creates an empty freelist
-    Freelist() 
-      : _head(nullptr) {}
-
-    /// @brief destroys all elements on the freelist
-    ~Freelist() {
-      while (_head != nullptr) {
-        Notifiable* notifiable = _head;
-        _head = _head->next;
-        delete notifiable;
-      }
-    }
-
-    /// @brief produces a new Notifiable, either from freelist or 
-    /// by allocating a new object on the heap
-    Notifiable* pop() {
-      Notifiable* notifiable = _head;
-      if (notifiable != nullptr) {
-        // some reusable object found on the freelist
-        _head = _head->next;
-        notifiable->next = nullptr;
-        return notifiable;
-      }
-      // freelist is empty
-      return new Notifiable();
-    }
-        
-    /// @brief adds a notifiable back to the freelist
-    void push(Notifiable* notifiable) noexcept {
-      assert(notifiable != nullptr);
-      notifiable->next = _head;
-      _head = notifiable;
-    }
-
-   private:
-    /// @brief freelist head
-    Notifiable* _head;
-  };
-  
   /// @brief a simple queue for readers or writers
   class Queue {
    public:
@@ -186,17 +144,15 @@ class FairLock {
      
       // put a Notifiable object into the write queue, that can be woken up whenever
       // it is its turn 
-      Notifiable* notifiable = _freelist.pop();
-      _writeQueue.add(notifiable);
+      Notifiable notifiable;
+      _writeQueue.add(&notifiable);
 
-      bool expired = !notifiable->cond.wait_until(guard, deadline, [&]() -> bool { 
+      bool expired = !notifiable.cond.wait_until(guard, deadline, [&]() -> bool { 
         return _whoEntered == 0 && (_readQueue.empty() || _nextPreferredPhase == Phase::WRITE); 
       });
      
       // clean up write queue
-      _writeQueue.remove(notifiable); 
-      // recycle Notifiable
-      _freelist.push(notifiable); 
+      _writeQueue.remove(&notifiable); 
 
       if (expired) {
         // could not acquire write-lock in time
@@ -222,17 +178,15 @@ class FairLock {
       
       // put a Notifiable object into the write queue, that can be woken up whenever
       // it is its turn 
-      Notifiable* notifiable = _freelist.pop();
-      _writeQueue.add(notifiable);
+      Notifiable notifiable;
+      _writeQueue.add(&notifiable);
 
-      notifiable->cond.wait(guard, [&]() -> bool { 
+      notifiable.cond.wait(guard, [&]() -> bool { 
         return _whoEntered == 0 && (_readQueue.empty() || _nextPreferredPhase == Phase::WRITE); 
       });
 
       // clean up write queue
-      _writeQueue.remove(notifiable);
-      // recycle Notifiable
-      _freelist.push(notifiable); 
+      _writeQueue.remove(&notifiable);
     }
 
     // successfully acquired the write-lock
@@ -274,17 +228,15 @@ class FairLock {
       
       // put a Notifiable object into the write queue, that can be woken up whenever
       // it is its turn 
-      Notifiable* notifiable = _freelist.pop();
-      _readQueue.add(notifiable);
+      Notifiable notifiable;
+      _readQueue.add(&notifiable);
       
-      bool expired = !notifiable->cond.wait_until(guard, deadline, [&]() -> bool { 
+      bool expired = !notifiable.cond.wait_until(guard, deadline, [&]() -> bool { 
         return _whoEntered >= 0 && (_writeQueue.empty() || _nextPreferredPhase == Phase::READ); 
       });
       
       // clean up read queue
-      _readQueue.remove(notifiable);
-      // recycle Notifiable
-      _freelist.push(notifiable); 
+      _readQueue.remove(&notifiable);
 
       if (expired) {
         // could not acquire read-lock in time
@@ -310,17 +262,15 @@ class FairLock {
 
       // put a Notifiable object into the write queue, that can be woken up whenever
       // it is its turn 
-      Notifiable* notifiable = _freelist.pop();
-      _readQueue.add(notifiable);
+      Notifiable notifiable;
+      _readQueue.add(&notifiable);
 
-      notifiable->cond.wait(guard, [&]() -> bool { 
+      notifiable.cond.wait(guard, [&]() -> bool { 
         return _whoEntered >= 0 && (_writeQueue.empty() || _nextPreferredPhase == Phase::READ); 
       });
 
       // clean up read queue
-      _readQueue.remove(notifiable);
-      // recycle Notifiable
-      _freelist.push(notifiable); 
+      _readQueue.remove(&notifiable);
     }
 
     // successfully acquired the read-lock
@@ -359,9 +309,6 @@ class FairLock {
   
   /// @brief currently queued read operations that will be notified eventually
   Queue _readQueue;
-  
-  /// @brief a freelist for reusing heap-allocated objects
-  Freelist _freelist;
   
   // @brief who is currently holding the lock:
   //    -1 = a writer got the lock, 
